@@ -98,7 +98,6 @@ func extractToken(r *http.Request) string {
 
 // validToken espera um token no formato "<exp>.<hmac>".
 func (s *Server) validToken(token string) bool {
-	// O cookie vai em base64 URL-safe; o header Authorization vai em claro.
 	if decoded, err := base64.RawURLEncoding.DecodeString(token); err == nil {
 		token = string(decoded)
 	}
@@ -193,7 +192,6 @@ func (s *Server) dashboard(w http.ResponseWriter, r *http.Request) {
 	analyzed, _ := s.db.RiskAssessmentCount()
 	tradesCount, _ := s.db.TradeCount()
 
-	// NOVO: Buscar o PnL realizado (apenas vendas simuladas)
 	var realizedPnl float64
 	_ = s.db.QueryRow(`SELECT COALESCE(SUM(realized_pnl_sol), 0) FROM trades WHERE state='simulated' AND side='sell'`).Scan(&realizedPnl)
 
@@ -208,7 +206,7 @@ func (s *Server) dashboard(w http.ResponseWriter, r *http.Request) {
 		"detectedTokens": detected,
 		"analyzedTokens": analyzed,
 		"tradesCount":    tradesCount,
-		"realizedPnlSOL": realizedPnl, // NOVO
+		"realizedPnlSOL": realizedPnl,
 	})
 }
 
@@ -230,6 +228,7 @@ func (s *Server) tokens(w http.ResponseWriter, r *http.Request) {
 		var (
 			mint, creator, reason, entryProfile string
 			side, tradeState, positionState     string
+			name, symbol, imageURI              string // NOVOS CAMPOS AQUI
 			latency                             int64
 			approved                            sql.NullBool
 			entryScore                          sql.NullFloat64
@@ -240,6 +239,7 @@ func (s *Server) tokens(w http.ResponseWriter, r *http.Request) {
 			&mint, &creator, &receivedAt, &latency,
 			&approved, &reason, &entryProfile, &entryScore,
 			&side, &tradeState, &positionState,
+			&name, &symbol, &imageURI, // LIDOS AQUI
 		); err != nil {
 			s.log.Warn("tokens: scan falhou", zap.Error(err))
 			continue
@@ -247,6 +247,9 @@ func (s *Server) tokens(w http.ResponseWriter, r *http.Request) {
 
 		out = append(out, map[string]any{
 			"mint":          mint,
+			"name":          name,
+			"symbol":        symbol,
+			"imageUri":      imageURI,
 			"creator":       creator,
 			"receivedAt":    receivedAt.UTC().Format(time.RFC3339),
 			"latencyMs":     latency,
@@ -339,7 +342,6 @@ func (s *Server) ws(w http.ResponseWriter, r *http.Request) {
 
 	upgrader := websocket.Upgrader{
 		CheckOrigin: func(r *http.Request) bool {
-			// Em produção, restringe à origem do dashboard.
 			return true
 		},
 	}

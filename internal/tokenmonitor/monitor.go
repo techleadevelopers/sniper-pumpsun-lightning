@@ -24,8 +24,6 @@ type MonitorConfig struct {
 	Momentum        MomentumConfig
 }
 
-// BuyFn é o callback chamado quando um novo token é aprovado pelo Profile.
-// Recebe creator para permitir blacklist no engine.
 type BuyFn func(
 	ctx context.Context,
 	mint string,
@@ -50,7 +48,6 @@ type Monitor struct {
 	mu       sync.Mutex
 	seen     map[string]time.Time
 
-	// Mints com posição aberta -> subscrever trades.
 	tracked map[string]bool
 
 	conn   *websocket.Conn
@@ -85,12 +82,6 @@ func New(
 	}
 }
 
-// ---------------------------------------------------------------------------
-// Tracking de mints abertas
-// ---------------------------------------------------------------------------
-
-// TrackMint pede ao WS para subscrever trades desta mint.
-// Idempotente: chamadas repetidas não duplicam subscrições.
 func (m *Monitor) TrackMint(mint string) {
 	m.mu.Lock()
 	already := m.tracked[mint]
@@ -106,7 +97,6 @@ func (m *Monitor) TrackMint(mint string) {
 	m.log.Info("WS: subscrito a trades", zap.String("mint", mint))
 }
 
-// UntrackMint remove a subscrição de trades.
 func (m *Monitor) UntrackMint(mint string) {
 	m.mu.Lock()
 	existed := m.tracked[mint]
@@ -136,10 +126,6 @@ func (m *Monitor) writeJSON(v any) error {
 	}
 	return m.conn.WriteJSON(v)
 }
-
-// ---------------------------------------------------------------------------
-// Run / conexão
-// ---------------------------------------------------------------------------
 
 func (m *Monitor) Run(ctx context.Context) {
 	backoff := time.Second
@@ -190,13 +176,11 @@ func (m *Monitor) connect(ctx context.Context) error {
 		c.Close()
 	}()
 
-	// Subscrição global de novos tokens.
 	if err := c.WriteJSON(map[string]string{"method": "subscribeNewToken"}); err != nil {
 		return err
 	}
 	m.log.Info("PumpPortal WS conectado; subscrito a subscribeNewToken")
 
-	// Re-subscreve mints que já estavam tracked (reconexão).
 	m.mu.Lock()
 	var toResub []string
 	for mint := range m.tracked {
@@ -220,10 +204,6 @@ func (m *Monitor) connect(ctx context.Context) error {
 	}
 }
 
-// ---------------------------------------------------------------------------
-// Frames
-// ---------------------------------------------------------------------------
-
 type wsFrame struct {
 	Mint             string  `json:"mint"`
 	TraderPublicKey  string  `json:"traderPublicKey"`
@@ -232,6 +212,10 @@ type wsFrame struct {
 	MarketCapSol     float64 `json:"marketCapSol"`
 	SolAmount        float64 `json:"solAmount"`
 	CreatedTimestamp float64 `json:"createdTimestamp"`
+	Name             string  `json:"name"`      // NOVO
+	Symbol           string  `json:"symbol"`    // NOVO
+	ImageURI         string  `json:"imageUri"`  // NOVO
+	URI              string  `json:"uri"`       // Fallback comum
 }
 
 func (m *Monitor) handleFrame(ctx context.Context, raw []byte) {
@@ -244,16 +228,19 @@ func (m *Monitor) handleFrame(ctx context.Context, raw []byte) {
 		return
 	}
 
+	// Fallback para a imagem
+	img := p.ImageURI
+	if img == "" {
+		img = p.URI
+	}
+
 	now := time.Now().UTC()
 
-	// ---- Caminho A: mint já tem posição aberta -> só atualiza mark ----
 	if m.isTracked(p.Mint) {
 		m.onTrackedTrade(p, now)
 		return
 	}
 
-	// ---- Caminho B: mint nova -> caminho de entrada ----
-	// Alimenta o tracker de momentum com trades.
 	if p.TxType == "buy" || p.TxType == "sell" {
 		m.mom.Record(TradeEvent{
 			Mint:      p.Mint,
@@ -264,7 +251,6 @@ func (m *Monitor) handleFrame(ctx context.Context, raw []byte) {
 		})
 	}
 
-	// Deduplicação de entradas (não repete compra da mesma mint).
 	if m.isDuplicate(p.Mint, now) {
 		return
 	}
@@ -279,7 +265,6 @@ func (m *Monitor) handleFrame(ctx context.Context, raw []byte) {
 		return
 	}
 
-	// Idade do token.
 	var tokenAge time.Duration
 	if p.CreatedTimestamp > 0 {
 		createdAt := time.Unix(int64(p.CreatedTimestamp), 0).UTC()
@@ -305,8 +290,11 @@ func (m *Monitor) handleFrame(ctx context.Context, raw []byte) {
 		_ = m.db.RecordAssessment(p.Mint, false, decision.Reason, "", 0)
 		if m.bus != nil {
 			m.bus.Publish("token_rejected", map[string]any{
-				"mint":   p.Mint,
-				"reason": decision.Reason,
+				"mint":     p.Mint,
+				"name":     p.Name,
+				"symbol":   p.Symbol,
+				"imageUri": img,
+				"reason":   decision.Reason,
 			})
 		}
 		return
@@ -317,9 +305,10 @@ func (m *Monitor) handleFrame(ctx context.Context, raw []byte) {
 		string(decision.Profile), decision.Score,
 	)
 
-	// Guarda o evento (para dashboard).
+	// Grava com os metadados
 	_ = m.db.RecordEvent(
 		p.Mint, p.TraderPublicKey, string(raw), now, 0,
+		p.Name, p.Symbol, img,
 	)
 
 	if m.cfg.EntryDelay > 0 {
@@ -344,9 +333,7 @@ func (m *Monitor) handleFrame(ctx context.Context, raw []byte) {
 	}
 }
 
-// onTrackedTrade atualiza a mark de um mint com posição aberta.
 func (m *Monitor) onTrackedTrade(p wsFrame, now time.Time) {
-	// Atualiza o momentum também (não faz mal; é só in-memory).
 	if p.TxType == "buy" || p.TxType == "sell" {
 		m.mom.Record(TradeEvent{
 			Mint:      p.Mint,
@@ -361,7 +348,6 @@ func (m *Monitor) onTrackedTrade(p wsFrame, now time.Time) {
 		return
 	}
 
-	// Persiste a mark atual (atual + peak). Não toca em entry.
 	if err := m.db.UpsertMark(m.simulation, p.Mint, p.MarketCapSol, false); err != nil {
 		m.log.Warn("falha a atualizar mark",
 			zap.String("mint", p.Mint),

@@ -196,12 +196,13 @@ func (d *DB) RecordSimulatedSellPnl(
 // Token events / assessments
 // ---------------------------------------------------------------------------
 
-func (d *DB) RecordEvent(mint, creator, raw string, at time.Time, latency int64) error {
+// RecordEvent agora guarda os metadados do token (name, symbol, image_uri).
+func (d *DB) RecordEvent(mint, creator, raw string, at time.Time, latency int64, name, symbol, imageURI string) error {
 	_, err := d.Exec(
-		`INSERT INTO token_events(mint, creator, received_at, raw_json, latency_ms)
-		 VALUES($1,$2,$3,$4,$5)
+		`INSERT INTO token_events(mint, creator, received_at, raw_json, latency_ms, name, symbol, image_uri)
+		 VALUES($1,$2,$3,$4,$5,$6,$7,$8)
 		 ON CONFLICT (mint, received_at) DO NOTHING`,
-		mint, creator, at, raw, latency,
+		mint, creator, at, raw, latency, name, symbol, imageURI,
 	)
 	return err
 }
@@ -239,7 +240,10 @@ func (d *DB) ListTokens() (*sql.Rows, error) {
 		        COALESCE(r.entry_score,0),
 		        COALESCE(t.side,''),
 		        COALESCE(t.state,''),
-		        COALESCE(p.status,'')
+		        COALESCE(p.status,''),
+		        COALESCE(e.name,''),
+		        COALESCE(e.symbol,''),
+		        COALESCE(e.image_uri,'')
 		 FROM token_events e
 		 LEFT JOIN risk_assessments r
 		        ON r.id = (SELECT MAX(r2.id) FROM risk_assessments r2 WHERE r2.mint = e.mint)
@@ -286,8 +290,6 @@ func (d *DB) OpenPositionMints() ([]string, error) {
 	return mints, rows.Err()
 }
 
-// OpenPositionDetails devolve o custo e a hora de abertura de uma posição aberta.
-// Usado pelo Position Manager para calcular ExitReason.
 func (d *DB) OpenPositionDetails(mint string) (cost float64, openedAt time.Time, ok bool, err error) {
 	err = d.QueryRow(
 		`SELECT COALESCE(cost_sol,0), opened_at
@@ -302,8 +304,6 @@ func (d *DB) OpenPositionDetails(mint string) (cost float64, openedAt time.Time,
 	return cost, openedAt, true, nil
 }
 
-// InsertPosition mantém a assinatura antiga (usada pelo main.go).
-// Não grava fees nem creator; usa InsertPositionWithFees para simulação realista.
 func (d *DB) InsertPosition(mint, quantity string, cost float64) error {
 	now := time.Now().UTC()
 	_, err := d.Exec(
@@ -319,7 +319,6 @@ func (d *DB) InsertPosition(mint, quantity string, cost float64) error {
 	return err
 }
 
-// InsertPositionWithFees grava a posição com fees e creator (para blacklist).
 func (d *DB) InsertPositionWithFees(
 	mint, creator, quantity string,
 	cost, fees float64,
@@ -391,8 +390,6 @@ func (d *DB) markTable(simulation bool) string {
 	return "live_marks"
 }
 
-// UpsertMark regista/atualiza a mark de um mint aberto.
-// isEntry=true fixa a mark de entrada; isEntry=false só atualiza current/peak.
 func (d *DB) UpsertMark(simulation bool, mint string, mcapSOL float64, isEntry bool) error {
 	tbl := d.markTable(simulation)
 	now := time.Now().UTC()
@@ -411,7 +408,6 @@ func (d *DB) UpsertMark(simulation bool, mint string, mcapSOL float64, isEntry b
 		return err
 	}
 
-	// Atualização normal: não mexe em entry_market_cap_sol.
 	_, err := d.Exec(
 		`INSERT INTO `+tbl+`(mint, entry_market_cap_sol, current_market_cap_sol, peak_market_cap_sol, price_source, updated_at)
 		 VALUES($1,$2,$2,$2,'ws',$3)
@@ -425,7 +421,6 @@ func (d *DB) UpsertMark(simulation bool, mint string, mcapSOL float64, isEntry b
 	return err
 }
 
-// Mark lê a mark atual (entry, current, peak).
 func (d *DB) Mark(simulation bool, mint string) (entry, current, peak float64, ok bool, err error) {
 	tbl := d.markTable(simulation)
 	row := d.QueryRow(
