@@ -193,8 +193,13 @@ func (s *Server) dashboard(w http.ResponseWriter, r *http.Request) {
 	analyzed, _ := s.db.RiskAssessmentCount()
 	tradesCount, _ := s.db.TradeCount()
 
+	mode := "LIVE"
+	if s.cfg.Simulation {
+		mode = "SIMULATION"
+	}
+
 	write(w, 200, map[string]any{
-		"mode":           s.cfg.Simulation,
+		"mode":           mode,
 		"openPositions":  positions,
 		"detectedTokens": detected,
 		"analyzedTokens": analyzed,
