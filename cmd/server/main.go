@@ -1,298 +1,259 @@
-package config
+package main
 
 import (
+	"context"
 	"fmt"
+	"net/http"
 	"os"
-	"strconv"
+	"os/signal"
 	"strings"
+	"syscall"
+	"time"
+
+	"go.uber.org/zap"
+
+	"sniper-lightning/internal/api"
+	"sniper-lightning/internal/config"
+	"sniper-lightning/internal/database"
+	"sniper-lightning/internal/events"
+	"sniper-lightning/internal/execution"
+	"sniper-lightning/internal/execution/pumpportal"
+	"sniper-lightning/internal/positions"
+	"sniper-lightning/internal/tokenmonitor"
 )
 
-type Config struct {
-	Simulation        bool
-	EnableLiveTrading bool
-	DatabaseURL       string
-	SimulationDBURL   string
-	RealDBURL         string
-	AdminPassword     string
-	HTTPAddr          string
-	PumpPortalKey     string
-	PumpPortalURL     string
-	PumpPortalWS      string
-	WalletPublicAddr  string
+func main() {
+	log, _ := zap.NewProduction()
+	defer log.Sync()
 
-	TradeUSD           float64
-	MaxTradeSOL        float64
-	MaxExposureSOL     float64
-	MaxDailyLossSOL    float64
-	FeeReserveSOL      float64
-	MaxOpenPositions   int
-	MaxSlippageBPS     int
-	MaxPriorityFeeSOL  float64
-	TakeProfitGrossPct float64
-	StopLossPct        float64
-	TrailingStopPct    float64
-	TrailingStopArmPct float64
-	MaxHoldSeconds     int
-
-	TokenQueueSize     int
-	EntryDelaySeconds  int
-	SnipeConcurrency   int
-	SnipeTimeoutMS     int
-	DedupeTTLMS        int
-	TokenMaxAgeSeconds int
-	PricePollSeconds   int
-
-	MinMarketCapSOL    float64
-	MaxMarketCapSOL    float64
-	MinVolumeBeforeBuy float64
-	MaxVolumeBeforeBuy float64
-
-	MomentumEnabled             bool
-	MomentumShortWindowSeconds  int
-	MomentumMediumWindowSeconds int
-	MomentumLongWindowSeconds   int
-	MomentumMinVolumeSOL        float64
-	MomentumMinBuyRatio         float64
-	MomentumMinUniqueBuyers     int
-	MomentumMinAcceleration     float64
-	MomentumMaxTradeAgeSeconds  int
-
-	EntryProfileMode          string
-	HoldersCacheSeconds       int
-	FirstPumpEnabled          bool
-	FirstPumpMaxTokenAgeSecs  int
-	FirstPumpMinMarketCapSOL  float64
-	FirstPumpMaxMarketCapSOL  float64
-	FirstPumpMinVolumeSOL     float64
-	FirstPumpMaxVolumeSOL     float64
-	MomentumProfileEnabled    bool
-	MomentumProfileMaxAgeSecs int
-	MomentumProfileMinMcapSOL float64
-	MomentumProfileMaxMcapSOL float64
-	MomentumProfileMinVolSOL  float64
-	MomentumProfileMaxVolSOL  float64
-	MomentumProfileMinHolders int
-	MomentumProfileRequireMom bool
-
-	CORSAllowedOrigins string
-
-	// NOVO: capital inicial da simulação (usado pelo dashboard e pela sessão).
-	SimulationStartBalanceSOL float64
-}
-
-func Load() (Config, error) {
-	c := Config{}
-	var err error
-
-	c.Simulation, err = boolEnv("SIMULATION", true)
+	cfg, err := config.Load()
 	if err != nil {
-		return c, err
+		log.Fatal("config inválida", zap.Error(err))
 	}
-	c.EnableLiveTrading, err = boolEnv("ENABLE_LIVE_TRADING", false)
+
+	// ---------- Guard de segurança do modo real ----------
+	if !cfg.Simulation && !cfg.EnableLiveTrading {
+		log.Fatal(
+			"SIMULATION=false mas ENABLE_LIVE_TRADING=false — abortar para segurança. " +
+				"Para operar a sério define ENABLE_LIVE_TRADING=true no .env.",
+		)
+	}
+	if cfg.Simulation && cfg.EnableLiveTrading {
+		log.Warn("SIMULATION=true com ENABLE_LIVE_TRADING=true — SIMULATION tem precedência; modo paper ativo")
+	}
+	log.Info("modo de arranque",
+		zap.Bool("simulation", cfg.Simulation),
+		zap.Bool("live_trading_enabled", cfg.EnableLiveTrading),
+	)
+
+	// ---------- Base de dados ----------
+	db, err := database.Open(cfg.DatabaseURL)
 	if err != nil {
-		return c, err
+		log.Fatal("falha ao abrir base de dados", zap.Error(err))
+	}
+	defer db.Close()
+
+	if err := db.Migrate(); err != nil {
+		log.Fatal("falha na migração", zap.Error(err))
 	}
 
-	c.SimulationDBURL = os.Getenv("SIMULATION_DATABASE_URL")
-	c.RealDBURL = os.Getenv("REAL_DATABASE_URL")
-	if c.SimulationDBURL == "" || c.RealDBURL == "" {
-		return c, fmt.Errorf("SIMULATION_DATABASE_URL and REAL_DATABASE_URL are required")
-	}
-	if c.Simulation {
-		c.DatabaseURL = c.SimulationDBURL
-	} else {
-		c.DatabaseURL = c.RealDBURL
+	if cfg.Simulation {
+		_ = db.EnsureSimulationSession(cfg.SimulationStartBalanceSOL)
 	}
 
-	c.AdminPassword = os.Getenv("ADMIN_PASSWORD")
-	if c.AdminPassword == "" {
-		return c, fmt.Errorf("ADMIN_PASSWORD is required")
+	// ---------- Event bus ----------
+	bus := events.New()
+
+	// ---------- PumpPortal client ----------
+	portal := pumpportal.New(cfg.PumpPortalURL, cfg.PumpPortalKey)
+
+	// ---------- Execution engine ----------
+	engine := execution.New(
+		db,
+		portal,
+		log,
+		bus,
+		cfg.Simulation,
+		execution.Limits{
+			MaxTradeSOL:          cfg.MaxTradeSOL,
+			MaxExposureSOL:       cfg.MaxExposureSOL,
+			MaxDailyLossSOL:      cfg.MaxDailyLossSOL,
+			FeeReserveSOL:        cfg.FeeReserveSOL,
+			MaxOpenPositions:     cfg.MaxOpenPositions,
+			MaxSlippageBPS:       cfg.MaxSlippageBPS,
+			MaxPriorityFeeSOL:    cfg.MaxPriorityFeeSOL,
+			SimulationBaseFeeSOL: 0.0001,
+		},
+	)
+
+	// ---------- Perfis de entrada ----------
+	profiles := tokenmonitor.Profiles{
+		Mode: tokenmonitor.EntryProfileMode(strings.ToLower(cfg.EntryProfileMode)),
+		FirstPump: tokenmonitor.ProfileConfig{
+			Enabled:               cfg.FirstPumpEnabled,
+			MaxTokenAge:           time.Duration(cfg.FirstPumpMaxTokenAgeSecs) * time.Second,
+			MinMarketCapSOL:       cfg.FirstPumpMinMarketCapSOL,
+			MaxMarketCapSOL:       cfg.FirstPumpMaxMarketCapSOL,
+			MinVolumeBeforeBuySOL: cfg.FirstPumpMinVolumeSOL,
+			MaxVolumeBeforeBuySOL: cfg.FirstPumpMaxVolumeSOL,
+			ScoreWeightVolume:     0.3,
+			ScoreWeightBuyRatio:   0.3,
+			ScoreWeightBuyers:     0.2,
+			ScoreWeightAccel:      0.2,
+			ScoreVolumeCapSOL:     10,
+			ScoreBuyersCap:        20,
+		},
+		Momentum: tokenmonitor.ProfileConfig{
+			Enabled:             cfg.MomentumProfileEnabled,
+			MaxTokenAge:         time.Duration(cfg.MomentumProfileMaxAgeSecs) * time.Second,
+			MinMarketCapSOL:     cfg.MomentumProfileMinMcapSOL,
+			MaxMarketCapSOL:     cfg.MomentumProfileMaxMcapSOL,
+			MinHolders:          cfg.MomentumProfileMinHolders,
+			RequireMomentum:     cfg.MomentumProfileRequireMom,
+			ScoreWeightVolume:   0.3,
+			ScoreWeightBuyRatio: 0.3,
+			ScoreWeightBuyers:   0.2,
+			ScoreWeightAccel:    0.2,
+			ScoreVolumeCapSOL:   20,
+			ScoreBuyersCap:      30,
+		},
+	}
+	if profiles.Mode == "" {
+		profiles.Mode = tokenmonitor.ModeAuto
 	}
 
-	c.HTTPAddr = env("HTTP_ADDR", ":8080")
-	c.PumpPortalKey = os.Getenv("PUMPPORTAL_API_KEY")
-	if c.PumpPortalKey == "" {
-		return c, fmt.Errorf("PUMPPORTAL_API_KEY is required")
-	}
-	c.PumpPortalURL = env("PUMPPORTAL_URL", "https://pumpportal.fun/api/trade")
-	c.PumpPortalWS = env("PUMPPORTAL_WS", "wss://pumpportal.fun/api/data")
-	c.WalletPublicAddr = os.Getenv("WALLET_PUBLIC_ADDRESS")
-
-	if c.TradeUSD, err = floatEnv("TRADE_USD", 1); err != nil {
-		return c, err
-	}
-	if c.MaxTradeSOL, err = floatEnv("MAX_TRADE_SOL", 0.05); err != nil {
-		return c, err
-	}
-	if c.MaxExposureSOL, err = floatEnv("MAX_EXPOSURE_SOL", 0.5); err != nil {
-		return c, err
-	}
-	if c.MaxDailyLossSOL, err = floatEnv("MAX_DAILY_LOSS_SOL", 0.15); err != nil {
-		return c, err
-	}
-	if c.FeeReserveSOL, err = floatEnv("FEE_RESERVE_SOL", 0.01); err != nil {
-		return c, err
-	}
-	if c.MaxOpenPositions, err = intEnv("MAX_OPEN_POSITIONS", 10); err != nil {
-		return c, err
-	}
-	if c.MaxSlippageBPS, err = intEnv("MAX_SLIPPAGE_BPS", 1500); err != nil {
-		return c, err
-	}
-	if c.MaxPriorityFeeSOL, err = floatEnv("MAX_PRIORITY_FEE_SOL", 0.001); err != nil {
-		return c, err
-	}
-	if c.TakeProfitGrossPct, err = floatEnv("TAKE_PROFIT_GROSS_PCT", 80); err != nil {
-		return c, err
-	}
-	if c.StopLossPct, err = floatEnv("STOP_LOSS_PCT", 20); err != nil {
-		return c, err
-	}
-	if c.TrailingStopPct, err = floatEnv("TRAILING_STOP_PCT", 15); err != nil {
-		return c, err
-	}
-	if c.TrailingStopArmPct, err = floatEnv("TRAILING_STOP_ARM_PCT", 10); err != nil {
-		return c, err
-	}
-	if c.MaxHoldSeconds, err = intEnv("MAX_HOLD_SECONDS", 1200); err != nil {
-		return c, err
+	// ---------- Monitor ----------
+	monitorCfg := tokenmonitor.MonitorConfig{
+		EntryDelay:      time.Duration(cfg.EntryDelaySeconds) * time.Second,
+		TokenMaxAge:     time.Duration(cfg.TokenMaxAgeSeconds) * time.Second,
+		MinMarketCapSOL: cfg.MinMarketCapSOL,
+		MaxMarketCapSOL: cfg.MaxMarketCapSOL,
+		DedupeTTL:       time.Duration(cfg.DedupeTTLMS) * time.Millisecond,
+		Momentum: tokenmonitor.MomentumConfig{
+			ShortWindow:     time.Duration(cfg.MomentumShortWindowSeconds) * time.Second,
+			MediumWindow:    time.Duration(cfg.MomentumMediumWindowSeconds) * time.Second,
+			LongWindow:      time.Duration(cfg.MomentumLongWindowSeconds) * time.Second,
+			MinVolumeSOL:    cfg.MomentumMinVolumeSOL,
+			MinBuyRatio:     cfg.MomentumMinBuyRatio,
+			MinUniqueBuyers: cfg.MomentumMinUniqueBuyers,
+			MinAcceleration: cfg.MomentumMinAcceleration,
+			MaxTradeAge:     time.Duration(cfg.MomentumMaxTradeAgeSeconds) * time.Second,
+		},
 	}
 
-	if c.TokenQueueSize, err = intEnv("TOKEN_QUEUE_SIZE", 5000); err != nil {
-		return c, err
-	}
-	if c.EntryDelaySeconds, err = intEnv("ENTRY_DELAY_SECONDS", 1); err != nil {
-		return c, err
-	}
-	if c.SnipeConcurrency, err = intEnv("SNIPE_CONCURRENCY", 4); err != nil {
-		return c, err
-	}
-	if c.SnipeTimeoutMS, err = intEnv("SNIPE_TIMEOUT_MS", 15000); err != nil {
-		return c, err
-	}
-	if c.DedupeTTLMS, err = intEnv("DEDUPE_TTL_MS", 60000); err != nil {
-		return c, err
-	}
-	if c.TokenMaxAgeSeconds, err = intEnv("TOKEN_MAX_AGE_SECONDS", 60); err != nil {
-		return c, err
-	}
-	if c.PricePollSeconds, err = intEnv("PRICE_POLL_SECONDS", 20); err != nil {
-		return c, err
+	// Callback de compra com creator (para blacklist) e mcap (para mark).
+	buyFn := func(
+		ctx context.Context,
+		mint string,
+		creator string,
+		mcapSOL float64,
+		profile string,
+		score float64,
+		reason string,
+	) error {
+		openCount, err := db.OpenPositionCount()
+		if err != nil {
+			return err
+		}
+		if cfg.MaxOpenPositions > 0 && openCount >= cfg.MaxOpenPositions {
+			return nil
+		}
+		has, err := db.HasOpenPosition(mint)
+		if err != nil {
+			return err
+		}
+		if has {
+			return nil
+		}
+
+		slippagePct := float64(cfg.MaxSlippageBPS) / 100.0
+		priorityFee := cfg.MaxPriorityFeeSOL
+		pool := "pump"
+
+		_, err = engine.BuyWithMark(ctx, execution.BuyRequest{
+			Mint:           mint,
+			Creator:        creator,
+			AmountSOL:      cfg.TradeUSD,
+			MarketCapSOL:   mcapSOL,
+			SlippagePct:    slippagePct,
+			PriorityFeeSOL: priorityFee,
+			Pool:           pool,
+			Reason:         reason,
+			Profile:        profile,
+			Score:          score,
+		})
+		return err
 	}
 
-	if c.MinMarketCapSOL, err = floatEnv("MIN_MARKET_CAP_SOL", 0); err != nil {
-		return c, err
-	}
-	if c.MaxMarketCapSOL, err = floatEnv("MAX_MARKET_CAP_SOL", 0); err != nil {
-		return c, err
-	}
-	if c.MinVolumeBeforeBuy, err = floatEnv("MIN_VOLUME_BEFORE_BUY", 0); err != nil {
-		return c, err
-	}
-	if c.MaxVolumeBeforeBuy, err = floatEnv("MAX_VOLUME_BEFORE_BUY", 100000); err != nil {
-		return c, err
+	monitor := tokenmonitor.New(
+		cfg.PumpPortalWS,
+		cfg.PumpPortalKey,
+		db,
+		bus,
+		log,
+		monitorCfg,
+		profiles,
+		cfg.Simulation,
+		buyFn,
+	)
+
+	// ---------- Position Manager ----------
+	exitLimits := positions.Limits{
+		TakeProfitPct:        cfg.TakeProfitGrossPct,
+		StopLossPct:          cfg.StopLossPct,
+		TrailingStopPct:      cfg.TrailingStopPct,
+		TrailingStopArmPct:   cfg.TrailingStopArmPct,
+		ExitTriggerBufferPct: 0.5,
+		MaxHold:              time.Duration(cfg.MaxHoldSeconds) * time.Second,
 	}
 
-	if c.MomentumEnabled, err = boolEnv("MOMENTUM_ENABLED", true); err != nil {
-		return c, err
-	}
-	if c.MomentumShortWindowSeconds, err = intEnv("MOMENTUM_SHORT_WINDOW_SECONDS", 10); err != nil {
-		return c, err
-	}
-	if c.MomentumMediumWindowSeconds, err = intEnv("MOMENTUM_MEDIUM_WINDOW_SECONDS", 30); err != nil {
-		return c, err
-	}
-	if c.MomentumLongWindowSeconds, err = intEnv("MOMENTUM_LONG_WINDOW_SECONDS", 60); err != nil {
-		return c, err
-	}
-	if c.MomentumMinVolumeSOL, err = floatEnv("MOMENTUM_MIN_VOLUME_SOL", 0.05); err != nil {
-		return c, err
-	}
-	if c.MomentumMinBuyRatio, err = floatEnv("MOMENTUM_MIN_BUY_RATIO", 0.60); err != nil {
-		return c, err
-	}
-	if c.MomentumMinUniqueBuyers, err = intEnv("MOMENTUM_MIN_UNIQUE_BUYERS", 3); err != nil {
-		return c, err
-	}
-	if c.MomentumMinAcceleration, err = floatEnv("MOMENTUM_MIN_ACCELERATION", 0.5); err != nil {
-		return c, err
-	}
-	if c.MomentumMaxTradeAgeSeconds, err = intEnv("MOMENTUM_MAX_TRADE_AGE_SECONDS", 120); err != nil {
-		return c, err
+	pollInterval := time.Duration(cfg.PricePollSeconds) * time.Second
+	if pollInterval <= 0 {
+		pollInterval = 5 * time.Second
 	}
 
-	c.EntryProfileMode = strings.ToLower(env("ENTRY_PROFILE_MODE", "auto"))
-	if c.HoldersCacheSeconds, err = intEnv("HOLDERS_CACHE_SECONDS", 30); err != nil {
-		return c, err
-	}
-	if c.FirstPumpEnabled, err = boolEnv("FIRST_PUMP_ENABLED", true); err != nil {
-		return c, err
-	}
-	if c.FirstPumpMaxTokenAgeSecs, err = intEnv("FIRST_PUMP_MAX_TOKEN_AGE_SECONDS", 30); err != nil {
-		return c, err
-	}
-	if c.FirstPumpMinMarketCapSOL, err = floatEnv("FIRST_PUMP_MIN_MARKET_CAP_SOL", 0); err != nil {
-		return c, err
-	}
-	if c.FirstPumpMaxMarketCapSOL, err = floatEnv("FIRST_PUMP_MAX_MARKET_CAP_SOL", 4); err != nil {
-		return c, err
-	}
-	if c.FirstPumpMinVolumeSOL, err = floatEnv("FIRST_PUMP_MIN_VOLUME_SOL", 0); err != nil {
-		return c, err
-	}
-	if c.FirstPumpMaxVolumeSOL, err = floatEnv("FIRST_PUMP_MAX_VOLUME_SOL", 5); err != nil {
-		return c, err
-	}
-	if c.MomentumProfileEnabled, err = boolEnv("MOMENTUM_PROFILE_ENABLED", true); err != nil {
-		return c, err
-	}
-	if c.MomentumProfileMaxAgeSecs, err = intEnv("MOMENTUM_PROFILE_MAX_TOKEN_AGE_SECONDS", 0); err != nil {
-		return c, err
-	}
-	if c.MomentumProfileMinMcapSOL, err = floatEnv("MOMENTUM_PROFILE_MIN_MARKET_CAP_SOL", 0); err != nil {
-		return c, err
-	}
-	if c.MomentumProfileMaxMcapSOL, err = floatEnv("MOMENTUM_PROFILE_MAX_MARKET_CAP_SOL", 0); err != nil {
-		return c, err
-	}
-	if c.MomentumProfileMinVolSOL, err = floatEnv("MOMENTUM_PROFILE_MIN_VOLUME_SOL", 0); err != nil {
-		return c, err
-	}
-	if c.MomentumProfileMaxVolSOL, err = floatEnv("MOMENTUM_PROFILE_MAX_VOLUME_SOL", 0); err != nil {
-		return c, err
-	}
-	if c.MomentumProfileMinHolders, err = intEnv("MOMENTUM_PROFILE_MIN_HOLDERS", 0); err != nil {
-		return c, err
-	}
-	if c.MomentumProfileRequireMom, err = boolEnv("MOMENTUM_PROFILE_REQUIRE_MOMENTUM", true); err != nil {
-		return c, err
+	manager := positions.NewManager(
+		db,
+		engine,  // satisfaz positions.Seller
+		monitor, // satisfaz positions.PriceTracker
+		log,
+		positions.ManagerConfig{
+			Simulation:     cfg.Simulation,
+			PollInterval:   pollInterval,
+			SlippagePct:    float64(cfg.MaxSlippageBPS) / 100.0,
+			PriorityFeeSOL: cfg.MaxPriorityFeeSOL,
+			Limits:         exitLimits,
+		},
+	)
+
+	// ---------- Arranque ----------
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	go monitor.Run(ctx)
+	go manager.Run(ctx)
+
+	// ---------- HTTP API ----------
+	handler := api.New(db, engine, monitor, bus, cfg, log)
+	srv := &http.Server{
+		Addr:              cfg.HTTPAddr,
+		Handler:           handler,
+		ReadHeaderTimeout: 10 * time.Second,
 	}
 
-	c.CORSAllowedOrigins = os.Getenv("CORS_ALLOWED_ORIGINS")
+	go func() {
+		log.Info("HTTP server a ouvir", zap.String("addr", cfg.HTTPAddr))
+		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Fatal("HTTP server falhou", zap.Error(err))
+		}
+	}()
 
-	// NOVO: capital inicial da simulação (1.0 SOL por omissão).
-	if c.SimulationStartBalanceSOL, err = floatEnv("SIMULATION_START_BALANCE_SOL", 1.0); err != nil {
-		return c, err
-	}
+	<-ctx.Done()
+	log.Info("a desligar...")
 
-	return c, nil
-}
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	_ = srv.Shutdown(shutdownCtx)
 
-func env(k, d string) string {
-	if v := os.Getenv(k); v != "" {
-		return v
-	}
-	return d
-}
-func boolEnv(k string, d bool) (bool, error) {
-	v := strings.TrimSpace(env(k, strconv.FormatBool(d)))
-	return strconv.ParseBool(strings.Trim(v, `"'`))
-}
-func floatEnv(k string, d float64) (float64, error) {
-	v := strings.TrimSpace(env(k, strconv.FormatFloat(d, 'f', -1, 64)))
-	return strconv.ParseFloat(strings.Trim(v, `"'`), 64)
-}
-func intEnv(k string, d int) (int, error) {
-	v := strings.TrimSpace(env(k, strconv.Itoa(d)))
-	return strconv.Atoi(strings.Trim(v, `"'`))
+	fmt.Println("servidor terminado")
 }
