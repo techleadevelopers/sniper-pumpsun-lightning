@@ -193,6 +193,10 @@ func (s *Server) dashboard(w http.ResponseWriter, r *http.Request) {
 	analyzed, _ := s.db.RiskAssessmentCount()
 	tradesCount, _ := s.db.TradeCount()
 
+	// NOVO: Buscar o PnL realizado (apenas vendas simuladas)
+	var realizedPnl float64
+	_ = s.db.QueryRow(`SELECT COALESCE(SUM(realized_pnl_sol), 0) FROM trades WHERE state='simulated' AND side='sell'`).Scan(&realizedPnl)
+
 	mode := "LIVE"
 	if s.cfg.Simulation {
 		mode = "SIMULATION"
@@ -204,6 +208,7 @@ func (s *Server) dashboard(w http.ResponseWriter, r *http.Request) {
 		"detectedTokens": detected,
 		"analyzedTokens": analyzed,
 		"tradesCount":    tradesCount,
+		"realizedPnlSOL": realizedPnl, // NOVO
 	})
 }
 
