@@ -318,7 +318,7 @@ func (m *Monitor) handleFrame(ctx context.Context, raw []byte) {
 	// Grava com os metadados, liquidez e o creator correto
 	_ = m.db.RecordEvent(
 		p.Mint, creator, string(raw), now, 0,
-		p.Name, p.Symbol, img, p.VSolInBondingCurve, p.VTokensInBondingCurve,
+		p.Name, p.Symbol, img, p.VSolInBondingCurve, p.VTokensInBondingCurve, p.MarketCapSol, // Adicionado p.MarketCapSol no fim
 	)
 
 	if m.cfg.EntryDelay > 0 {

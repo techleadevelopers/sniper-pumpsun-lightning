@@ -194,18 +194,23 @@ func (s *Server) dashboard(w http.ResponseWriter, r *http.Request) {
 	var realizedPnl float64
 	_ = s.db.QueryRow(`SELECT COALESCE(SUM(realized_pnl_sol), 0) FROM trades WHERE state='simulated' AND side='sell'`).Scan(&realizedPnl)
 
+	// Saldo virtual = capital inicial (config) + PnL realizado dos trades simulados.
+	// Ajusta o nome do campo se no config.Config for diferente (ex.: InitialBalanceSOL).
+	virtualBalanceSOL := s.cfg.VirtualBalanceSOL + realizedPnl
+
 	mode := "LIVE"
 	if s.cfg.Simulation {
 		mode = "SIMULATION"
 	}
 
 	write(w, 200, map[string]any{
-		"mode":           mode,
-		"openPositions":  positions,
-		"detectedTokens": detected,
-		"analyzedTokens": analyzed,
-		"tradesCount":    tradesCount,
-		"realizedPnlSOL": realizedPnl,
+		"mode":              mode,
+		"openPositions":     positions,
+		"detectedTokens":    detected,
+		"analyzedTokens":    analyzed,
+		"tradesCount":       tradesCount,
+		"realizedPnlSOL":    realizedPnl,
+		"virtualBalanceSOL": virtualBalanceSOL,
 	})
 }
 
@@ -245,23 +250,33 @@ func (s *Server) tokens(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 
+		// Market cap = price * total supply.
+		// Pump.fun-style: totalSupply = 1_000_000_000.
+		// price = vSolInCurve / vTokensInCurve.
+		var marketCap *float64
+		if vTokens > 0 {
+			mc := (vSol / vTokens) * 1_000_000_000
+			marketCap = &mc
+		}
+
 		out = append(out, map[string]any{
-			"mint":          mint,
-			"name":          name,
-			"symbol":        symbol,
-			"imageUri":      imageURI,
-			"vSolInCurve":   vSol,
+			"mint":           mint,
+			"name":           name,
+			"symbol":         symbol,
+			"imageUri":       imageURI,
+			"vSolInCurve":    vSol,
 			"vTokensInCurve": vTokens,
-			"creator":       creator,
-			"receivedAt":    receivedAt.UTC().Format(time.RFC3339),
-			"latencyMs":     latency,
-			"approved":      approved.Valid && approved.Bool,
-			"reason":        reason,
-			"entryProfile":  entryProfile,
-			"entryScore":    entryScore.Float64,
-			"tradeSide":     side,
-			"tradeState":    tradeState,
-			"positionState": positionState,
+			"marketCap":      marketCap,
+			"creator":        creator,
+			"receivedAt":     receivedAt.UTC().Format(time.RFC3339),
+			"latencyMs":      latency,
+			"approved":       approved.Valid && approved.Bool,
+			"reason":         reason,
+			"entryProfile":   entryProfile,
+			"entryScore":     entryScore.Float64,
+			"tradeSide":      side,
+			"tradeState":     tradeState,
+			"positionState":  positionState,
 		})
 	}
 

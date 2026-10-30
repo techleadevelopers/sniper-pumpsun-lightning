@@ -196,13 +196,13 @@ func (d *DB) RecordSimulatedSellPnl(
 // Token events / assessments
 // ---------------------------------------------------------------------------
 
-// RecordEvent agora guarda os metadados do token (name, symbol, image_uri) e a liquidez.
-func (d *DB) RecordEvent(mint, creator, raw string, at time.Time, latency int64, name, symbol, imageURI string, vSol, vTokens float64) error {
+// RecordEvent agora guarda os metadados do token (name, symbol, image_uri), a liquidez e o MarketCap.
+func (d *DB) RecordEvent(mint, creator, raw string, at time.Time, latency int64, name, symbol, imageURI string, vSol, vTokens, marketCapSol float64) error {
 	_, err := d.Exec(
-		`INSERT INTO token_events(mint, creator, received_at, raw_json, latency_ms, name, symbol, image_uri, vsol_bonding_curve, vtoken_bonding_curve)
-		 VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+		`INSERT INTO token_events(mint, creator, received_at, raw_json, latency_ms, name, symbol, image_uri, vsol_bonding_curve, vtoken_bonding_curve, market_cap_sol)
+		 VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
 		 ON CONFLICT (mint, received_at) DO NOTHING`,
-		mint, creator, at, raw, latency, name, symbol, imageURI, vSol, vTokens,
+		mint, creator, at, raw, latency, name, symbol, imageURI, vSol, vTokens, marketCapSol,
 	)
 	return err
 }
@@ -245,7 +245,8 @@ func (d *DB) ListTokens() (*sql.Rows, error) {
 		        COALESCE(e.symbol,''),
 		        COALESCE(e.image_uri,''),
 		        COALESCE(e.vsol_bonding_curve,0),
-		        COALESCE(e.vtoken_bonding_curve,0)
+		        COALESCE(e.vtoken_bonding_curve,0),
+		        COALESCE(e.market_cap_sol,0)
 		 FROM token_events e
 		 LEFT JOIN risk_assessments r
 		        ON r.id = (SELECT MAX(r2.id) FROM risk_assessments r2 WHERE r2.mint = e.mint)
