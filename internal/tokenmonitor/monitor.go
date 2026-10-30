@@ -35,18 +35,18 @@ type BuyFn func(
 ) error
 
 type Monitor struct {
-	wsURL  string
-	apiKey string
-	db     *database.DB
-	bus    *events.Bus
-	log    *zap.Logger
-	cfg    MonitorConfig
-	profiles Profiles
-	buyFn  BuyFn
+	wsURL      string
+	apiKey     string
+	db         *database.DB
+	bus        *events.Bus
+	log        *zap.Logger
+	cfg        MonitorConfig
+	profiles   Profiles
+	buyFn      BuyFn
 	simulation bool
 
-	mu       sync.Mutex
-	seen     map[string]time.Time
+	mu   sync.Mutex
+	seen map[string]time.Time
 
 	tracked map[string]bool
 
@@ -206,8 +206,8 @@ func (m *Monitor) connect(ctx context.Context) error {
 
 type wsFrame struct {
 	Mint                  string  `json:"mint"`
-	Creator               string  `json:"creator"`          // NOVO: para eventos de criação
-	TraderPublicKey       string  `json:"traderPublicKey"`  // Para eventos de trade
+	Creator               string  `json:"creator"`         // NOVO: para eventos de criação
+	TraderPublicKey       string  `json:"traderPublicKey"` // Para eventos de trade
 	TxType                string  `json:"txType"`
 	Signature             string  `json:"signature"`
 	MarketCapSol          float64 `json:"marketCapSol"`
@@ -368,8 +368,8 @@ func (m *Monitor) onTrackedTrade(p wsFrame, now time.Time) {
 
 	if m.bus != nil {
 		m.bus.Publish("price_update", map[string]any{
-			"mint":     p.Mint,
-			"mcapSOL":  p.MarketCapSol,
+			"mint":    p.Mint,
+			"mcapSOL": p.MarketCapSol,
 		})
 	}
 }

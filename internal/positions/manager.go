@@ -13,8 +13,10 @@ import (
 
 // Seller é o que o Manager precisa do execution.Engine.
 // Definir aqui (em vez de importar execution) evita o import cycle:
-//   execution -> positions (para PnL/IsStopLoss)
-//   positions -> execution (seria ciclo)
+//
+//	execution -> positions (para PnL/IsStopLoss)
+//	positions -> execution (seria ciclo)
+//
 // O engine.Sell satisfaz esta interface sem saber dela.
 type Seller interface {
 	Sell(ctx context.Context, mint string, slippagePct float64, priorityFeeSOL float64, reason string) (string, error)

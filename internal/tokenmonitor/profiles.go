@@ -60,14 +60,14 @@ func DefaultProfiles() Profiles {
 			ScoreBuyersCap:        20,
 		},
 		Momentum: ProfileConfig{
-			Enabled:               true,
-			RequireMomentum:       true,
-			ScoreWeightVolume:     0.3,
-			ScoreWeightBuyRatio:   0.3,
-			ScoreWeightBuyers:     0.2,
-			ScoreWeightAccel:      0.2,
-			ScoreVolumeCapSOL:     20,
-			ScoreBuyersCap:        30,
+			Enabled:             true,
+			RequireMomentum:     true,
+			ScoreWeightVolume:   0.3,
+			ScoreWeightBuyRatio: 0.3,
+			ScoreWeightBuyers:   0.2,
+			ScoreWeightAccel:    0.2,
+			ScoreVolumeCapSOL:   20,
+			ScoreBuyersCap:      30,
 		},
 	}
 }

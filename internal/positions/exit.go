@@ -25,11 +25,11 @@ type Limits struct {
 
 // ExitReason decide a saída apenas com preço verificado.
 // Ordem (contrato da máquina de estados):
-//   1. sem preço verificado / sem custo   -> não decide
-//   2. stop loss                          -> única razão que dispara blacklist
-//   3. trailing stop                      -> só depois do braço armado
-//   4. take profit
-//   5. max hold                           -> liberta vagas, exclui a dead zone
+//  1. sem preço verificado / sem custo   -> não decide
+//  2. stop loss                          -> única razão que dispara blacklist
+//  3. trailing stop                      -> só depois do braço armado
+//  4. take profit
+//  5. max hold                           -> liberta vagas, exclui a dead zone
 func ExitReason(p Position, currentSOL float64, liquid bool, l Limits, now time.Time) string {
 	if !liquid {
 		return ""
