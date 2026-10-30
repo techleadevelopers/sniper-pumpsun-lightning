@@ -205,17 +205,20 @@ func (m *Monitor) connect(ctx context.Context) error {
 }
 
 type wsFrame struct {
-	Mint             string  `json:"mint"`
-	TraderPublicKey  string  `json:"traderPublicKey"`
-	TxType           string  `json:"txType"`
-	Signature        string  `json:"signature"`
-	MarketCapSol     float64 `json:"marketCapSol"`
-	SolAmount        float64 `json:"solAmount"`
-	CreatedTimestamp float64 `json:"createdTimestamp"`
-	Name             string  `json:"name"`      // NOVO
-	Symbol           string  `json:"symbol"`    // NOVO
-	ImageURI         string  `json:"imageUri"`  // NOVO
-	URI              string  `json:"uri"`       // Fallback comum
+	Mint                  string  `json:"mint"`
+	Creator               string  `json:"creator"`          // NOVO: para eventos de criação
+	TraderPublicKey       string  `json:"traderPublicKey"`  // Para eventos de trade
+	TxType                string  `json:"txType"`
+	Signature             string  `json:"signature"`
+	MarketCapSol          float64 `json:"marketCapSol"`
+	SolAmount             float64 `json:"solAmount"`
+	CreatedTimestamp      float64 `json:"createdTimestamp"`
+	Name                  string  `json:"name"`
+	Symbol                string  `json:"symbol"`
+	ImageURI              string  `json:"imageUri"`
+	URI                   string  `json:"uri"`
+	VSolInBondingCurve    float64 `json:"vSolInBondingCurve"`
+	VTokensInBondingCurve float64 `json:"vTokensInBondingCurve"`
 }
 
 func (m *Monitor) handleFrame(ctx context.Context, raw []byte) {
@@ -232,6 +235,12 @@ func (m *Monitor) handleFrame(ctx context.Context, raw []byte) {
 	img := p.ImageURI
 	if img == "" {
 		img = p.URI
+	}
+
+	// Fallback para o criador (create usa "creator", trade usa "traderPublicKey")
+	creator := p.Creator
+	if creator == "" {
+		creator = p.TraderPublicKey
 	}
 
 	now := time.Now().UTC()
@@ -294,6 +303,7 @@ func (m *Monitor) handleFrame(ctx context.Context, raw []byte) {
 				"name":     p.Name,
 				"symbol":   p.Symbol,
 				"imageUri": img,
+				"creator":  creator,
 				"reason":   decision.Reason,
 			})
 		}
@@ -305,10 +315,10 @@ func (m *Monitor) handleFrame(ctx context.Context, raw []byte) {
 		string(decision.Profile), decision.Score,
 	)
 
-	// Grava com os metadados
+	// Grava com os metadados, liquidez e o creator correto
 	_ = m.db.RecordEvent(
-		p.Mint, p.TraderPublicKey, string(raw), now, 0,
-		p.Name, p.Symbol, img,
+		p.Mint, creator, string(raw), now, 0,
+		p.Name, p.Symbol, img, p.VSolInBondingCurve, p.VTokensInBondingCurve,
 	)
 
 	if m.cfg.EntryDelay > 0 {
@@ -321,7 +331,7 @@ func (m *Monitor) handleFrame(ctx context.Context, raw []byte) {
 
 	if m.buyFn != nil {
 		if err := m.buyFn(
-			ctx, p.Mint, p.TraderPublicKey,
+			ctx, p.Mint, creator, // Passa o creator correto
 			p.MarketCapSol,
 			string(decision.Profile), decision.Score, decision.Reason,
 		); err != nil {

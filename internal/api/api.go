@@ -96,7 +96,6 @@ func extractToken(r *http.Request) string {
 	return ""
 }
 
-// validToken espera um token no formato "<exp>.<hmac>".
 func (s *Server) validToken(token string) bool {
 	if decoded, err := base64.RawURLEncoding.DecodeString(token); err == nil {
 		token = string(decoded)
@@ -228,7 +227,8 @@ func (s *Server) tokens(w http.ResponseWriter, r *http.Request) {
 		var (
 			mint, creator, reason, entryProfile string
 			side, tradeState, positionState     string
-			name, symbol, imageURI              string // NOVOS CAMPOS AQUI
+			name, symbol, imageURI              string
+			vSol, vTokens                       float64
 			latency                             int64
 			approved                            sql.NullBool
 			entryScore                          sql.NullFloat64
@@ -239,7 +239,7 @@ func (s *Server) tokens(w http.ResponseWriter, r *http.Request) {
 			&mint, &creator, &receivedAt, &latency,
 			&approved, &reason, &entryProfile, &entryScore,
 			&side, &tradeState, &positionState,
-			&name, &symbol, &imageURI, // LIDOS AQUI
+			&name, &symbol, &imageURI, &vSol, &vTokens,
 		); err != nil {
 			s.log.Warn("tokens: scan falhou", zap.Error(err))
 			continue
@@ -250,6 +250,8 @@ func (s *Server) tokens(w http.ResponseWriter, r *http.Request) {
 			"name":          name,
 			"symbol":        symbol,
 			"imageUri":      imageURI,
+			"vSolInCurve":   vSol,
+			"vTokensInCurve": vTokens,
 			"creator":       creator,
 			"receivedAt":    receivedAt.UTC().Format(time.RFC3339),
 			"latencyMs":     latency,
