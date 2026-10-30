@@ -38,10 +38,16 @@ func Open(databaseURL string) (*DB, error) {
 }
 
 // Migrate aplica todas as migrações embebidas que ainda não foram aplicadas.
+//
+// Além das migrações normais, força (de forma idempotente) a existência da
+// coluna token_events.market_cap_sol em cada arranque, garantindo que o
+// MarketCapSOL dos eventos é sempre persistido — mesmo que a migração original
+// tenha falhado em ambientes antigos.
 func (d *DB) Migrate() error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
+	// 1. Tabela de controlo de migrações
 	if _, err := d.Exec(`CREATE TABLE IF NOT EXISTS schema_migrations (
 		version BIGINT PRIMARY KEY,
 		applied_at TIMESTAMPTZ NOT NULL
@@ -49,6 +55,15 @@ func (d *DB) Migrate() error {
 		return fmt.Errorf("create schema_migrations: %w", err)
 	}
 
+	// 2. Garantir a coluna market_cap_sol (idempotente)
+	if _, err := d.Exec(`
+		ALTER TABLE token_events
+		ADD COLUMN IF NOT EXISTS market_cap_sol DOUBLE PRECISION DEFAULT 0
+	`); err != nil {
+		return fmt.Errorf("ensure token_events.market_cap_sol: %w", err)
+	}
+
+	// 3. Aplicar migrações embebidas normais
 	files, err := fs.Glob(migrations, "migrations/postgres/*.sql")
 	if err != nil {
 		return err
@@ -56,7 +71,8 @@ func (d *DB) Migrate() error {
 	for _, f := range files {
 		var version int
 		if _, err := fmt.Sscanf(filepath.Base(f), "%d_", &version); err != nil {
-			return fmt.Errorf("invalid migration filename %s: %w", f, err)
+			// Ignora ficheiros com nomes inválidos em vez de abortar tudo.
+			continue
 		}
 
 		var exists int
