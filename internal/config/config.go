@@ -6,7 +6,6 @@ import (
 	"strconv"
 	"strings"
 )
-
 type Config struct {
 	Simulation        bool
 	EnableLiveTrading bool
