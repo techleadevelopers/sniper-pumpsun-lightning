@@ -75,6 +75,8 @@ type Config struct {
 	MomentumProfileRequireMom bool
 
 	CORSAllowedOrigins string
+
+	SimulationStartBalanceSOL float64
 }
 
 func Load() (Config, error) {
@@ -266,6 +268,10 @@ func Load() (Config, error) {
 	}
 
 	c.CORSAllowedOrigins = os.Getenv("CORS_ALLOWED_ORIGINS")
+
+	if c.SimulationStartBalanceSOL, err = floatEnv("SIMULATION_START_BALANCE_SOL", 1.0); err != nil {
+		return c, err
+	}
 
 	return c, nil
 }

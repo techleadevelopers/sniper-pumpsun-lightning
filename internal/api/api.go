@@ -192,11 +192,23 @@ func (s *Server) dashboard(w http.ResponseWriter, r *http.Request) {
 	tradesCount, _ := s.db.TradeCount()
 
 	var realizedPnl float64
-	_ = s.db.QueryRow(`SELECT COALESCE(SUM(realized_pnl_sol), 0) FROM trades WHERE state='simulated' AND side='sell'`).Scan(&realizedPnl)
+	_ = s.db.QueryRow(
+		`SELECT COALESCE(SUM(realized_pnl_sol), 0)
+		 FROM trades
+		 WHERE state='simulated' AND side='sell'`,
+	).Scan(&realizedPnl)
 
-	// Saldo virtual = capital inicial (config) + PnL realizado dos trades simulados.
-	// Ajusta o nome do campo se no config.Config for diferente (ex.: InitialBalanceSOL).
-	virtualBalanceSOL := s.cfg.VirtualBalanceSOL + realizedPnl
+	// Saldo virtual: em simulação usamos o cálculo da DB
+	// (capital inicial + PnL realizado - fees - posições abertas).
+	// Em live devolvemos 0 por agora (não temos leitura on-chain aqui).
+	var virtualBalanceSOL float64
+	if s.cfg.Simulation {
+		if bal, err := s.db.SimulationAvailableBalanceSOL(s.cfg.SimulationStartBalanceSOL); err == nil {
+			virtualBalanceSOL = bal
+		} else {
+			s.log.Warn("dashboard: falha ao calcular saldo virtual", zap.Error(err))
+		}
+	}
 
 	mode := "LIVE"
 	if s.cfg.Simulation {
@@ -250,9 +262,7 @@ func (s *Server) tokens(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 
-		// Market cap = price * total supply.
-		// Pump.fun-style: totalSupply = 1_000_000_000.
-		// price = vSolInCurve / vTokensInCurve.
+		// Market cap = price * total supply (pump.fun: 1_000_000_000).
 		var marketCap *float64
 		if vTokens > 0 {
 			mc := (vSol / vTokens) * 1_000_000_000
