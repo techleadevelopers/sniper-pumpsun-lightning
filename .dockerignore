@@ -1,0 +1,34 @@
+# Segredos — NUNCA entram na imagem
+.env
+.env.*
+*.pem
+*.key
+
+# Binários locais
+sniper
+sniper.exe
+*.exe
+
+# Base de dados local
+data/
+*.db
+*.sqlite
+
+# Controlo de versão
+.git
+.gitignore
+.gitattributes
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# Documentação
+README.md
+docs/
+
+# Docker próprio
+Dockerfile
+.dockerignore
+railway.toml
