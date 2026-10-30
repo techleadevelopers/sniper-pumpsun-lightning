@@ -1,7 +1,7 @@
 # ============================================================
 # Etapa 1 — Build
 # ============================================================
-FROM golang:1.22-alpine AS builder
+FROM golang:1.25-alpine AS builder
 
 # Ferramentas mínimas para módulos com CGO desativado
 RUN apk add --no-cache git ca-certificates
@@ -24,7 +24,7 @@ RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
 # ============================================================
 # Etapa 2 — Runtime
 # ============================================================
-FROM alpine:3.20
+FROM alpine:3.21
 
 # ca-certificates: necessário para HTTPS à PumpPortal
 # tzdata: para timestamps corretos
@@ -38,11 +38,10 @@ COPY --from=builder /out/sniper /app/sniper
 
 USER sniper
 
-# O Railway injeta a porta via $PORT; o teu código usa :8080 por defeito.
-# O Railway deteta automaticamente a porta exposta via env ou pelo bind.
+# O Railway/Render injeta a porta via $PORT; o teu código usa :8080 por defeito.
 EXPOSE 8080
 
-# Healthcheck interno (Railway também faz o seu próprio)
+# Healthcheck interno
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
     CMD wget -qO- http://127.0.0.1:8080/api/health || exit 1
 
